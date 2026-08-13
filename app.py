@@ -66,10 +66,34 @@ Z = 1000                       # crop size at level 0 (~213 um)
 DISP = 700                     # canvas display size (px)
 
 
+BUNDLE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bundle")
+
+
 # ----------------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def get_sections() -> dict:
     return IO.af_sections()
+
+
+@st.cache_data(show_spinner=False)
+def get_bundle() -> dict:
+    """{sid: [crop_meta, ...]} from the pre-exported bundle, if present."""
+    mpath = os.path.join(BUNDLE_DIR, "manifest.json")
+    if not os.path.exists(mpath):
+        return {}
+    with open(mpath) as f:
+        rows = json.load(f)
+    out: dict[str, list] = {}
+    for r in rows:
+        out.setdefault(r["sample_id"], []).append(r)
+    return out
+
+
+@st.cache_data(show_spinner=True)
+def load_bundle_crop(crop_id: str):
+    """Return the grayscale display image for a pre-exported crop."""
+    p = os.path.join(BUNDLE_DIR, "crops", f"{crop_id}.png")
+    return np.asarray(Image.open(p).convert("L"), dtype=np.float32) / 255.0
 
 
 @st.cache_data(show_spinner=True)
@@ -122,33 +146,52 @@ st.caption("Trace each myelin sheath (bright red-dominant index), press **Ring l
            "repeat. Masks + labels are saved locally and pushed to GitHub.")
 
 secs = get_sections()
-if not secs:
-    st.error("No AF-capable Xenium sections found. Set MYELIN_DATA_DIRS.")
+bundle = get_bundle()
+BUNDLED = not secs and bool(bundle)
+if not secs and not bundle:
+    st.error("No AF-capable Xenium sections found (set MYELIN_DATA_DIRS) and no "
+             "pre-exported bundle/ present. Run export_crops.py where the raw data lives.")
     st.stop()
+if BUNDLED:
+    st.info("Running from pre-exported crops (bundle/). Raw Xenium stacks not on this "
+            "machine, so crop location is fixed to the exported fields.")
 
 with st.sidebar:
     st.header("1 · Pick image")
-    sid = st.selectbox("Section", sorted(secs), index=0)
-    sample_dir, dapi_path = secs[sid]
-    base_dir = os.path.dirname(os.path.dirname(dapi_path))  # section dir
-    slide = IO.slide_of(sample_dir)
-    H0, W0 = IO.level_shape(dapi_path, 0)
-    st.write(f"slide **{slide}** · {W0}×{H0} px")
+    section_ids = sorted(bundle) if BUNDLED else sorted(secs)
+    sid = st.selectbox("Section", section_ids, index=0)
 
-    xy_all, grid = transcript_field(base_dir, H0, W0)
     st.header("2 · Choose crop")
-    mode = st.radio("Locate crop", ["Auto (myelin-dense)", "Manual"], horizontal=True)
-    if mode.startswith("Auto") and grid is not None:
-        order = np.dstack(np.unravel_index(np.argsort(grid.ravel())[::-1], grid.shape))[0]
-        rank = st.number_input("Field rank (0 = densest)", 0, max(len(order) - 1, 0), 0)
-        by, bx = order[int(rank)]
-        y0 = int(np.clip(by * Z, 0, max(H0 - Z, 0)))
-        x0 = int(np.clip(bx * Z, 0, max(W0 - Z, 0)))
-        st.caption(f"~{int(grid[by, bx])} myelin transcripts in this field")
+    if BUNDLED:
+        crops = sorted(bundle[sid], key=lambda r: -r["n_transcripts"])
+        labels = [f"{c['crop_id']}  (~{c['n_transcripts']} tx)" for c in crops]
+        pick = st.selectbox("Crop (myelin-dense fields)", range(len(crops)),
+                            format_func=lambda i: labels[i])
+        cmeta = crops[pick]
+        sample_dir, slide = cmeta["sample_dir"], cmeta["slide"]
+        y0, x0 = cmeta["y0"], cmeta["x0"]
+        crop_id = cmeta["crop_id"]
+        st.write(f"slide **{slide}**")
     else:
-        y0 = st.number_input("y0", 0, max(H0 - Z, 0), 0, step=Z // 2)
-        x0 = st.number_input("x0", 0, max(W0 - Z, 0), 0, step=Z // 2)
-    crop_id = f"{sid}_y{y0}_x{x0}"
+        sample_dir, dapi_path = secs[sid]
+        base_dir = os.path.dirname(os.path.dirname(dapi_path))  # section dir
+        slide = IO.slide_of(sample_dir)
+        H0, W0 = IO.level_shape(dapi_path, 0)
+        st.write(f"slide **{slide}** · {W0}×{H0} px")
+
+        xy_all, grid = transcript_field(base_dir, H0, W0)
+        mode = st.radio("Locate crop", ["Auto (myelin-dense)", "Manual"], horizontal=True)
+        if mode.startswith("Auto") and grid is not None:
+            order = np.dstack(np.unravel_index(np.argsort(grid.ravel())[::-1], grid.shape))[0]
+            rank = st.number_input("Field rank (0 = densest)", 0, max(len(order) - 1, 0), 0)
+            by, bx = order[int(rank)]
+            y0 = int(np.clip(by * Z, 0, max(H0 - Z, 0)))
+            x0 = int(np.clip(bx * Z, 0, max(W0 - Z, 0)))
+            st.caption(f"~{int(grid[by, bx])} myelin transcripts in this field")
+        else:
+            y0 = st.number_input("y0", 0, max(H0 - Z, 0), 0, step=Z // 2)
+            x0 = st.number_input("x0", 0, max(W0 - Z, 0), 0, step=Z // 2)
+        crop_id = f"{sid}_y{y0}_x{x0}"
 
     st.header("3 · Save target")
     repo = st.text_input("GitHub repo (owner/name)", M.GH_REPO_DEFAULT)
@@ -157,7 +200,10 @@ with st.sidebar:
     token_ok = bool(gh.get_token())
     st.caption("token from secrets: " + ("✅ found" if token_ok else "❌ missing"))
 
-ch, tissue, idxn, disp = load_crop(dapi_path, y0, x0)
+if BUNDLED:
+    disp = load_bundle_crop(crop_id)
+else:
+    ch, tissue, idxn, disp = load_crop(dapi_path, y0, x0)
 bg = rgb_display(disp)
 
 # per-crop annotation state (reset when the crop changes)
