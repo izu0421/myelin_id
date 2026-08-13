@@ -151,8 +151,17 @@ BUNDLED = not secs and bool(bundle)
 if not secs and not bundle:
     st.error("No AF-capable Xenium sections found (set MYELIN_DATA_DIRS) and no "
              "pre-exported bundle/ present. Run export_crops.py where the raw data lives.")
-    st.stop()
-if BUNDLED:
+    with st.expander("Diagnostics"):
+        st.write("BUNDLE_DIR:", BUNDLE_DIR)
+        st.write("manifest exists:", os.path.exists(os.path.join(BUNDLE_DIR, "manifest.json")))
+        try:
+            st.write("bundle dir contents:", os.listdir(BUNDLE_DIR))
+        except Exception as e:
+            st.write("listdir error:", repr(e))
+        st.write("MYELIN_DATA_DIRS:", M.DATA_DIRS)
+    if st.button("🔄 Reload / clear cache"):
+        st.cache_data.clear()
+        st.rerun()
     st.info("Running from pre-exported crops (bundle/). Raw Xenium stacks not on this "
             "machine, so crop location is fixed to the exported fields.")
 
