@@ -42,13 +42,13 @@ if not hasattr(_st_image, "image_to_url"):
         buf = _io.BytesIO()
         image.save(buf, format="PNG")
         data = buf.getvalue()
-        from streamlit.runtime import Runtime
-        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        from streamlit.runtime import Runtime, caching
         try:
             mfm = Runtime.instance().media_file_mgr
-            ctx = get_script_run_ctx()
-            coords = str(image_id)
-            return mfm.add(data, "image/png", coords)
+            url = mfm.add(data, "image/png", str(image_id))
+            # persist so the file survives GC and is actually served (esp. on Cloud)
+            caching.save_media_data(data, "image/png", str(image_id))
+            return url
         except Exception:
             import base64 as _b64
             return "data:image/png;base64," + _b64.b64encode(data).decode("ascii")
