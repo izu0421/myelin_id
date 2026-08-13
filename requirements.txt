@@ -1,0 +1,9 @@
+streamlit>=1.37
+streamlit-drawable-canvas>=0.9.3
+pandas>=2.1
+numpy>=1.26
+tifffile>=2024.6
+imagecodecs>=2024.1
+scikit-image>=0.22
+pillow>=10.0
+pyarrow>=15.0
