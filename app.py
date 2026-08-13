@@ -24,11 +24,12 @@ from skimage.draw import polygon as sk_polygon
 
 # --- compat shim: streamlit-drawable-canvas 0.9.3 imports
 # `streamlit.elements.image.image_to_url`, removed in Streamlit >= 1.60.
-# Provide a self-contained data-URL implementation before importing the canvas.
+# fabric.js (the canvas) will not load a `data:` URL as a background image, so we
+# must serve the PNG through Streamlit's MediaFileManager and return a same-origin
+# `/media/...` URL — exactly what the original image_to_url did.
 import streamlit.elements.image as _st_image  # noqa: E402
 
 if not hasattr(_st_image, "image_to_url"):
-    import base64 as _b64
     import io as _io
 
     def image_to_url(image, width=None, clamp=False, channels="RGB",
@@ -40,8 +41,17 @@ if not hasattr(_st_image, "image_to_url"):
             image = Image.fromarray(arr)
         buf = _io.BytesIO()
         image.save(buf, format="PNG")
-        data = _b64.b64encode(buf.getvalue()).decode("ascii")
-        return f"data:image/png;base64,{data}"
+        data = buf.getvalue()
+        from streamlit.runtime import Runtime
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        try:
+            mfm = Runtime.instance().media_file_mgr
+            ctx = get_script_run_ctx()
+            coords = str(image_id)
+            return mfm.add(data, "image/png", coords)
+        except Exception:
+            import base64 as _b64
+            return "data:image/png;base64," + _b64.b64encode(data).decode("ascii")
 
     _st_image.image_to_url = image_to_url
 
@@ -101,24 +111,15 @@ def _read_repo_csv(repo, branch, path, token):
     return None
 
 
-def rgb_display(disp: np.ndarray, xy_local: np.ndarray) -> Image.Image:
+def rgb_display(disp: np.ndarray) -> Image.Image:
     rgb = (np.dstack([disp, disp, disp]) * 255).astype(np.uint8)
-    img = Image.fromarray(rgb).resize((DISP, DISP), Image.BILINEAR)
-    # draw transcript dots as magenta pixels (downsampled)
-    if len(xy_local):
-        from PIL import ImageDraw
-        d = ImageDraw.Draw(img)
-        s = DISP / Z
-        for x, y in xy_local:
-            px, py = int(x * s), int(y * s)
-            d.ellipse([px - 1, py - 1, px + 1, py + 1], fill=(255, 55, 208))
-    return img
+    return Image.fromarray(rgb).resize((DISP, DISP), Image.BILINEAR)
 
 
 # ----------------------------------------------------------------------------
 st.title("🧫 Myelin ring labeler")
-st.caption("Trace myelin sheaths (red-dominant index) guided by myelin-gene transcripts (magenta). "
-           "Masks + labels are saved locally and pushed to GitHub.")
+st.caption("Trace each myelin sheath (bright red-dominant index), press **Ring labelled**, "
+           "repeat. Masks + labels are saved locally and pushed to GitHub.")
 
 secs = get_sections()
 if not secs:
@@ -157,26 +158,34 @@ with st.sidebar:
     st.caption("token from secrets: " + ("✅ found" if token_ok else "❌ missing"))
 
 ch, tissue, idxn, disp = load_crop(dapi_path, y0, x0)
-xy_local = xy_all[(xy_all[:, 0] >= x0) & (xy_all[:, 0] < x0 + Z) &
-                  (xy_all[:, 1] >= y0) & (xy_all[:, 1] < y0 + Z)] - [x0, y0] if len(xy_all) else np.empty((0, 2))
-bg = rgb_display(disp, xy_local)
+bg = rgb_display(disp)
 
-st.subheader(f"Crop: {crop_id}  ·  {len(xy_local)} myelin transcripts")
-c1, c2 = st.columns([3, 1])
-with c2:
-    tool = st.radio("Tool", ["polygon (rings)", "point (negatives)"])
-    stroke = st.slider("Stroke width", 1, 5, 2)
-    st.markdown("- **polygon**: click to add points, close to finish a ring\n"
-                "- **point**: click non-myelin spots (collagen/background)")
+# per-crop annotation state (reset when the crop changes)
+if st.session_state.get("crop_key") != crop_id:
+    st.session_state.crop_key = crop_id
+    st.session_state.rings = []
+    st.session_state.negs = []
+    st.session_state.cseq = st.session_state.get("cseq", 0) + 1
 
-with c1:
-    canvas = st_canvas(
-        background_image=bg,
-        drawing_mode="polygon" if tool.startswith("polygon") else "point",
-        stroke_width=stroke, stroke_color="#FFE94A",
-        fill_color="rgba(255,233,74,0.25)", point_display_radius=3,
-        update_streamlit=True, height=DISP, width=DISP, key=f"canvas_{crop_id}",
-    )
+st.subheader(f"Crop: {crop_id}")
+tc1, tc2 = st.columns([1, 2])
+with tc1:
+    tool = st.radio("Tool", ["ring (freehand)", "negative (point)"], horizontal=True)
+    stroke = st.slider("Stroke width", 1, 6, 3)
+with tc2:
+    st.markdown(
+        "1. **ring**: drag a freehand loop around **one** sheath, then press "
+        "**✅ Ring labelled** — it stores the ring and clears the canvas.\n"
+        "2. **negative**: click non-myelin spots, then press **➕ Add negatives**.")
+
+canvas = st_canvas(
+    background_image=bg,
+    drawing_mode="freedraw" if tool.startswith("ring") else "point",
+    stroke_width=stroke, stroke_color="#FFE94A",
+    fill_color="rgba(255,233,74,0.25)", point_display_radius=3,
+    update_streamlit=True, height=DISP, width=DISP,
+    key=f"canvas_{crop_id}_{st.session_state.cseq}",
+)
 
 
 # ---- rasterize canvas -> instance mask + negatives -------------------------
@@ -186,26 +195,54 @@ def parse_canvas(canvas_result):
         return rings, negs
     scale = Z / DISP
     for obj in canvas_result.json_data.get("objects", []):
-        if obj.get("type") == "path" or obj.get("type") == "polygon":
-            pts = obj.get("path") or obj.get("points")
+        otype = obj.get("type")
+        if otype in ("path", "polygon", "polyline"):
             verts = []
-            if obj.get("type") == "polygon":
-                left, top = obj.get("left", 0), obj.get("top", 0)
+            if otype == "polygon" or otype == "polyline":
                 for p in obj.get("points", []):
-                    verts.append(((p["x"]) * scale, (p["y"]) * scale))
+                    verts.append((p["x"] * scale, p["y"] * scale))
             else:
-                for seg in pts:
-                    if len(seg) >= 3:
-                        verts.append((seg[1] * scale, seg[2] * scale))
+                # fabric freedraw path: list of SVG segments; endpoint is the
+                # last two numbers of each segment (M x y / Q cx cy x y / L x y).
+                for seg in obj.get("path", []):
+                    nums = [v for v in seg[1:] if isinstance(v, (int, float))]
+                    if len(nums) >= 2:
+                        verts.append((nums[-2] * scale, nums[-1] * scale))
             if len(verts) >= 3:
                 rings.append(verts)
-        elif obj.get("type") == "circle":
-            negs.append((obj.get("left", 0) * scale, obj.get("top", 0) * scale))
+        elif otype == "circle":
+            r = obj.get("radius", 0)
+            negs.append(((obj.get("left", 0) + r) * scale,
+                         (obj.get("top", 0) + r) * scale))
     return rings, negs
 
 
-rings, negs = parse_canvas(canvas)
-st.write(f"**{len(rings)} rings**, **{len(negs)} negatives** drawn")
+cur_rings, cur_negs = parse_canvas(canvas)
+
+bcol = st.columns(4)
+if bcol[0].button(f"✅ Ring labelled  ({len(cur_rings)} on canvas)",
+                  type="primary", disabled=len(cur_rings) == 0):
+    st.session_state.rings.extend(cur_rings)
+    st.session_state.cseq += 1
+    st.rerun()
+if bcol[1].button(f"➕ Add negatives  ({len(cur_negs)})",
+                  disabled=len(cur_negs) == 0):
+    st.session_state.negs.extend(cur_negs)
+    st.session_state.cseq += 1
+    st.rerun()
+if bcol[2].button("↩ Undo last ring", disabled=len(st.session_state.rings) == 0):
+    st.session_state.rings.pop()
+    st.rerun()
+if bcol[3].button("🗑 Clear all",
+                  disabled=not (st.session_state.rings or st.session_state.negs)):
+    st.session_state.rings, st.session_state.negs = [], []
+    st.session_state.cseq += 1
+    st.rerun()
+
+rings = st.session_state.rings
+negs = st.session_state.negs
+st.write(f"**{len(rings)} rings labelled** · **{len(negs)} negatives**  "
+         f"(on canvas now: {len(cur_rings)} ring / {len(cur_negs)} pts)")
 
 
 def build_mask(rings):
