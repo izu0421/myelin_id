@@ -256,17 +256,34 @@ with tc2:
 # On Streamlit Cloud the /media/ background URL is auth-gated + CORS-blocked
 # inside the canvas iframe. In bundled mode the crop is public on GitHub, so
 # point the canvas background at the raw URL (CORS-friendly) instead.
+#
+# The canvas lib builds the final URL as `server.baseUrlPath + image_to_url(...)`.
+# On Cloud baseUrlPath is non-empty and corrupts our absolute https:// URL, so we
+# force that option to "" for the duration of the st_canvas call.
 _CANVAS_BG_URL = f"{M.BUNDLE_URL_PREFIX}/{crop_id}.png" if BUNDLED else None
 
-canvas = st_canvas(
-    background_image=bg,
-    drawing_mode="freedraw" if tool.startswith("ring") else "point",
-    stroke_width=stroke, stroke_color="#FFE94A",
-    fill_color="rgba(255,233,74,0.25)", point_display_radius=3,
-    update_streamlit=True, height=DISP, width=DISP,
-    key=f"canvas_{crop_id}_{st.session_state.cseq}",
-)
-_CANVAS_BG_URL = None
+_saved_base = st._config.get_option("server.baseUrlPath")
+if _CANVAS_BG_URL:
+    try:
+        st._config.set_option("server.baseUrlPath", "")
+    except Exception:
+        pass
+try:
+    canvas = st_canvas(
+        background_image=bg,
+        drawing_mode="freedraw" if tool.startswith("ring") else "point",
+        stroke_width=stroke, stroke_color="#FFE94A",
+        fill_color="rgba(255,233,74,0.25)", point_display_radius=3,
+        update_streamlit=True, height=DISP, width=DISP,
+        key=f"canvas_{crop_id}_{st.session_state.cseq}",
+    )
+finally:
+    if _CANVAS_BG_URL:
+        try:
+            st._config.set_option("server.baseUrlPath", _saved_base)
+        except Exception:
+            pass
+    _CANVAS_BG_URL = None
 
 
 # ---- rasterize canvas -> instance mask + negatives -------------------------
