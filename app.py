@@ -35,33 +35,43 @@ import streamlit.elements.image as _st_image  # noqa: E402
 
 # set by the app just before calling st_canvas to force a specific background URL
 _CANVAS_BG_URL: str | None = None
+_orig_image_to_url = getattr(_st_image, "image_to_url", None)
 
-if not hasattr(_st_image, "image_to_url"):
-    import io as _io
 
-    def image_to_url(image, width=None, clamp=False, channels="RGB",
-                     output_format="PNG", image_id="", *args, **kwargs):
-        if _CANVAS_BG_URL:
-            return _CANVAS_BG_URL
-        if isinstance(image, np.ndarray):
-            arr = image
-            if arr.dtype != np.uint8:
-                arr = np.clip(arr, 0, 255).astype(np.uint8)
-            image = Image.fromarray(arr)
-        buf = _io.BytesIO()
-        image.save(buf, format="PNG")
-        data = buf.getvalue()
-        from streamlit.runtime import Runtime, caching
+def _image_to_url(image, width=None, clamp=False, channels="RGB",
+                  output_format="PNG", image_id="", *args, **kwargs):
+    # Force a public URL for the canvas background when the app asks for it
+    # (bundle crops on raw.githubusercontent.com are CORS-friendly; the Cloud
+    # /media/ URL is auth-gated + CORS-blocked inside the component iframe).
+    if _CANVAS_BG_URL:
+        return _CANVAS_BG_URL
+    if _orig_image_to_url is not None:
         try:
-            mfm = Runtime.instance().media_file_mgr
-            url = mfm.add(data, "image/png", str(image_id))
-            caching.save_media_data(data, "image/png", str(image_id))
-            return url
+            return _orig_image_to_url(image, width, clamp, channels,
+                                      output_format, image_id, *args, **kwargs)
         except Exception:
-            import base64 as _b64
-            return "data:image/png;base64," + _b64.b64encode(data).decode("ascii")
+            pass
+    import io as _io
+    if isinstance(image, np.ndarray):
+        arr = image if image.dtype == np.uint8 else np.clip(image, 0, 255).astype(np.uint8)
+        image = Image.fromarray(arr)
+    buf = _io.BytesIO()
+    image.save(buf, format="PNG")
+    data = buf.getvalue()
+    try:
+        from streamlit.runtime import Runtime, caching
+        mfm = Runtime.instance().media_file_mgr
+        url = mfm.add(data, "image/png", str(image_id))
+        caching.save_media_data(data, "image/png", str(image_id))
+        return url
+    except Exception:
+        import base64 as _b64
+        return "data:image/png;base64," + _b64.b64encode(data).decode("ascii")
 
-    _st_image.image_to_url = image_to_url
+
+# always install our wrapper so the _CANVAS_BG_URL override works regardless of
+# which Streamlit version is present (older ones still ship image_to_url).
+_st_image.image_to_url = _image_to_url
 
 from streamlit_drawable_canvas import st_canvas  # noqa: E402
 
