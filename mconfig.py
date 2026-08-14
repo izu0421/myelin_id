@@ -31,6 +31,15 @@ MYELIN_GENES = ["MPZ", "MBP", "PRX", "PMP22", "PLP1", "CNP", "DRP2", "PMP2"]
 QV_MIN = 20
 
 # --- GitHub defaults (token comes from st.secrets, never hard-coded) -----
-GH_REPO_DEFAULT = os.environ.get("MYELIN_GH_REPO", "")     # "owner/name"
+GH_REPO_DEFAULT = os.environ.get("MYELIN_GH_REPO", "izu0421/myelin_id")  # "owner/name"
 GH_BRANCH_DEFAULT = os.environ.get("MYELIN_GH_BRANCH", "main")
 GH_PATH_PREFIX = os.environ.get("MYELIN_GH_PREFIX", "myelin_labels")  # dir in repo
+
+# Public repo the bundle/ crops live in — used to serve canvas backgrounds via
+# raw.githubusercontent.com (CORS-friendly; works inside the canvas iframe on
+# Streamlit Cloud, unlike the gated /media/ URL).
+BUNDLE_REPO = os.environ.get("MYELIN_BUNDLE_REPO", "izu0421/myelin_id")
+BUNDLE_BRANCH = os.environ.get("MYELIN_BUNDLE_BRANCH", "main")
+BUNDLE_URL_PREFIX = os.environ.get(
+    "MYELIN_BUNDLE_URL_PREFIX",
+    f"https://raw.githubusercontent.com/{BUNDLE_REPO}/{BUNDLE_BRANCH}/bundle/crops")

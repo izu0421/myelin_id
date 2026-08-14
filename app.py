@@ -24,16 +24,25 @@ from skimage.draw import polygon as sk_polygon
 
 # --- compat shim: streamlit-drawable-canvas 0.9.3 imports
 # `streamlit.elements.image.image_to_url`, removed in Streamlit >= 1.60.
-# fabric.js (the canvas) will not load a `data:` URL as a background image, so we
-# must serve the PNG through Streamlit's MediaFileManager and return a same-origin
-# `/media/...` URL — exactly what the original image_to_url did.
+#
+# On Streamlit Cloud the MediaFileManager `/media/...` URL is redirected to an
+# auth endpoint and CORS-blocked inside the component iframe, so the canvas
+# background never loads. When a public URL for the image is available (our
+# bundle crops live in a public GitHub repo) we return that directly instead —
+# raw.githubusercontent.com serves `Access-Control-Allow-Origin: *`, so fabric
+# can load it cross-origin. Otherwise we fall back to the media URL (fine locally).
 import streamlit.elements.image as _st_image  # noqa: E402
+
+# set by the app just before calling st_canvas to force a specific background URL
+_CANVAS_BG_URL: str | None = None
 
 if not hasattr(_st_image, "image_to_url"):
     import io as _io
 
     def image_to_url(image, width=None, clamp=False, channels="RGB",
                      output_format="PNG", image_id="", *args, **kwargs):
+        if _CANVAS_BG_URL:
+            return _CANVAS_BG_URL
         if isinstance(image, np.ndarray):
             arr = image
             if arr.dtype != np.uint8:
@@ -46,7 +55,6 @@ if not hasattr(_st_image, "image_to_url"):
         try:
             mfm = Runtime.instance().media_file_mgr
             url = mfm.add(data, "image/png", str(image_id))
-            # persist so the file survives GC and is actually served (esp. on Cloud)
             caching.save_media_data(data, "image/png", str(image_id))
             return url
         except Exception:
@@ -162,6 +170,8 @@ if not secs and not bundle:
     if st.button("🔄 Reload / clear cache"):
         st.cache_data.clear()
         st.rerun()
+    st.stop()
+if BUNDLED:
     st.info("Running from pre-exported crops (bundle/). Raw Xenium stacks not on this "
             "machine, so crop location is fixed to the exported fields.")
 
@@ -233,6 +243,11 @@ with tc2:
         "**✅ Ring labelled** — it stores the ring and clears the canvas.\n"
         "2. **negative**: click non-myelin spots, then press **➕ Add negatives**.")
 
+# On Streamlit Cloud the /media/ background URL is auth-gated + CORS-blocked
+# inside the canvas iframe. In bundled mode the crop is public on GitHub, so
+# point the canvas background at the raw URL (CORS-friendly) instead.
+_CANVAS_BG_URL = f"{M.BUNDLE_URL_PREFIX}/{crop_id}.png" if BUNDLED else None
+
 canvas = st_canvas(
     background_image=bg,
     drawing_mode="freedraw" if tool.startswith("ring") else "point",
@@ -241,6 +256,7 @@ canvas = st_canvas(
     update_streamlit=True, height=DISP, width=DISP,
     key=f"canvas_{crop_id}_{st.session_state.cseq}",
 )
+_CANVAS_BG_URL = None
 
 
 # ---- rasterize canvas -> instance mask + negatives -------------------------
